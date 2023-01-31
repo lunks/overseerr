@@ -46,71 +46,103 @@ class AvailabilitySync {
     const pageSize = 50;
 
     try {
-      for await (const mediaPage of this.loadAvailableMediaPaginated(
-        pageSize
-      )) {
+      for await (const media of this.loadAvailableMediaPaginated(pageSize)) {
         try {
           if (!this.running) {
             throw new Error('Job aborted');
           }
 
-          for (const media of mediaPage) {
-            const mediaExists = await this.mediaExists(media);
+          const mediaExists = await this.mediaExists(media);
 
-            //We can not delete media so if both versions do not exist, we will change both columns to unknown or null
-            if (!mediaExists) {
-              if (
-                media.status !== MediaStatus.UNKNOWN &&
-                media.status4k !== MediaStatus.UNKNOWN
-              ) {
-                const request = await requestRepository.find({
-                  relations: {
-                    media: true,
-                  },
-                  where: { media: { id: media.id } },
-                });
-
-                logger.debug(
-                  `${media.tmdbId} does not exist in any of your media instances. We will change its status to unknown.`,
-                  { label: 'AvailabilitySync' }
-                );
-
-                await mediaRepository.update(media.id, {
-                  status: MediaStatus.UNKNOWN,
-                  status4k: MediaStatus.UNKNOWN,
-                  serviceId: null,
-                  serviceId4k: null,
-                  externalServiceId: null,
-                  externalServiceId4k: null,
-                  externalServiceSlug: null,
-                  externalServiceSlug4k: null,
-                  ratingKey: null,
-                  ratingKey4k: null,
-                });
-
-                await requestRepository.remove(request);
-              }
-              continue;
-            }
-
-            if (media.mediaType === 'tv') {
-              // ok, the show itself exists, but do all it's seasons?
-              const seasons = await seasonRepository.find({
-                where: [
-                  { status: MediaStatus.AVAILABLE, media: { id: media.id } },
-                  { status4k: MediaStatus.AVAILABLE, media: { id: media.id } },
-                ],
+          //We can not delete media so if both versions do not exist, we will change both columns to unknown or null
+          if (!mediaExists) {
+            if (
+              media.status !== MediaStatus.UNKNOWN ||
+              media.status4k !== MediaStatus.UNKNOWN
+            ) {
+              const request = await requestRepository.find({
+                relations: {
+                  media: true,
+                },
+                where: { media: { id: media.id } },
               });
 
-              let didDeleteSeasons = false;
-              for (const season of seasons) {
+              logger.debug(
+                `${
+                  media.mediaType === 'tv' ? media.tvdbId : media.tmdbId
+                } does not exist in any of your media instances. We will change its status to unknown.`,
+                { label: 'AvailabilitySync' }
+              );
+
+              await mediaRepository.update(media.id, {
+                status: MediaStatus.UNKNOWN,
+                status4k: MediaStatus.UNKNOWN,
+                serviceId: null,
+                serviceId4k: null,
+                externalServiceId: null,
+                externalServiceId4k: null,
+                externalServiceSlug: null,
+                externalServiceSlug4k: null,
+                ratingKey: null,
+                ratingKey4k: null,
+              });
+
+              await requestRepository.remove(request);
+            }
+          }
+
+          if (media.mediaType === 'tv') {
+            // ok, the show itself exists, but do all it's seasons?
+            const seasons = await seasonRepository.find({
+              where: [
+                { status: MediaStatus.AVAILABLE, media: { id: media.id } },
+                {
+                  status: MediaStatus.PARTIALLY_AVAILABLE,
+                  media: { id: media.id },
+                },
+                { status4k: MediaStatus.AVAILABLE, media: { id: media.id } },
+                {
+                  status4k: MediaStatus.PARTIALLY_AVAILABLE,
+                  media: { id: media.id },
+                },
+              ],
+            });
+
+            let didDeleteSeasons = false;
+            for (const season of seasons) {
+              if (
+                !mediaExists &&
+                (season.status !== MediaStatus.UNKNOWN ||
+                  season.status4k !== MediaStatus.UNKNOWN)
+              ) {
+                await seasonRepository.update(
+                  { id: season.id },
+                  {
+                    status: MediaStatus.UNKNOWN,
+                    status4k: MediaStatus.UNKNOWN,
+                  }
+                );
+              } else {
                 const seasonExists = await this.seasonExists(media, season);
 
                 if (!seasonExists) {
                   logger.debug(
-                    `Removing season ${season.seasonNumber}, media id: ${media.tmdbId} because it doesn't appear in any library.`,
+                    `Removing season ${season.seasonNumber}, media id: ${media.tvdbId} because it does not exist in any of your media instances.`,
                     { label: 'AvailabilitySync' }
                   );
+
+                  if (
+                    season.status !== MediaStatus.UNKNOWN ||
+                    season.status4k !== MediaStatus.UNKNOWN
+                  ) {
+                    await seasonRepository.update(
+                      { id: season.id },
+                      {
+                        status: MediaStatus.UNKNOWN,
+                        status4k: MediaStatus.UNKNOWN,
+                      }
+                    );
+                  }
 
                   const seasonToBeDeleted =
                     await seasonRequestRepository.findOne({
@@ -129,8 +161,6 @@ class AvailabilitySync {
                       },
                     });
 
-                  await seasonRepository.delete(season.id);
-
                   if (seasonToBeDeleted) {
                     await seasonRequestRepository.remove(seasonToBeDeleted);
                   }
@@ -145,7 +175,7 @@ class AvailabilitySync {
                   media.status4k === MediaStatus.AVAILABLE
                 ) {
                   logger.debug(
-                    `Marking media id: ${media.tmdbId} as PARTIALLY_AVAILABLE because we deleted some of its seasons.`,
+                    `Marking media id: ${media.tvdbId} as PARTIALLY_AVAILABLE because we deleted some of its seasons.`,
                     { label: 'AvailabilitySync' }
                   );
 
@@ -198,20 +228,15 @@ class AvailabilitySync {
       { status4k: MediaStatus.PARTIALLY_AVAILABLE },
     ];
 
-    let mediaPage = await mediaRepository.find({
-      where: whereOptions,
-      skip: offset,
-      take: pageSize,
-    });
+    let mediaPage: Media[];
 
     do {
-      yield mediaPage;
-      offset += pageSize;
-      mediaPage = await mediaRepository.find({
+      yield* (mediaPage = await mediaRepository.find({
         where: whereOptions,
         skip: offset,
         take: pageSize,
-      });
+      }));
+      offset += pageSize;
     } while (mediaPage.length > 0);
   }
 
@@ -285,7 +310,6 @@ class AvailabilitySync {
 
       //check if both exist or if a single non-4k or 4k exists
       //if both do not exist we will return false
-
       if (!server.is4k && !meta.id) {
         existsInRadarr = false;
       }
@@ -309,7 +333,6 @@ class AvailabilitySync {
 
     //if only a single non-4k or 4k exists, then change entity columns accordingly
     //related media request will then be deleted
-
     if (!existsInRadarr && existsInRadarr4k && !existsInPlex) {
       if (media.status !== MediaStatus.UNKNOWN) {
         this.mediaUpdater(media, false);
@@ -353,7 +376,6 @@ class AvailabilitySync {
 
       //check if both exist or if a single non-4k or 4k exists
       //if both do not exist we will return false
-
       if (!server.is4k && !meta.id) {
         existsInSonarr = false;
       }
@@ -377,7 +399,6 @@ class AvailabilitySync {
 
     //if only a single non-4k or 4k exists, then change entity columns accordingly
     //related media request will then be deleted
-
     if (!existsInSonarr && existsInSonarr4k && !existsInPlex) {
       if (media.status !== MediaStatus.UNKNOWN) {
         this.mediaUpdater(media, false);
@@ -402,7 +423,7 @@ class AvailabilitySync {
     season: Season,
     seasonExistsInPlex: boolean,
     seasonExistsInPlex4k: boolean
-  ) {
+  ): Promise<boolean> {
     if (!media.tvdbId) {
       return false;
     }
@@ -470,7 +491,6 @@ class AvailabilitySync {
 
     //if season does not exist, we will change status to unknown and delete related season request
     //if parent media request is empty(all related seasons have been removed), parent is automatically deleted
-
     if (
       !seasonExistsInSonarr &&
       seasonExistsInSonarr4k &&
@@ -491,7 +511,7 @@ class AvailabilitySync {
 
         if (media.status === MediaStatus.AVAILABLE) {
           logger.debug(
-            `Marking media id: ${media.tmdbId} as PARTIALLY_AVAILABLE because we deleted one of its seasons.`,
+            `Marking media id: ${media.tvdbId} as PARTIALLY_AVAILABLE because we deleted one of its seasons.`,
             { label: 'AvailabilitySync' }
           );
           await mediaRepository.update(media.id, {
@@ -521,7 +541,7 @@ class AvailabilitySync {
 
         if (media.status4k === MediaStatus.AVAILABLE) {
           logger.debug(
-            `Marking media id: ${media.tmdbId} as PARTIALLY_AVAILABLE because we deleted one of its seasons.`,
+            `Marking media id: ${media.tvdbId} as PARTIALLY_AVAILABLE because we deleted one of its seasons.`,
             { label: 'AvailabilitySync' }
           );
           await mediaRepository.update(media.id, {
@@ -546,7 +566,6 @@ class AvailabilitySync {
     let existsInPlex4k = false;
 
     //check each plex instance to see if media exists
-
     try {
       if (ratingKey) {
         const meta = await this.plexClient?.getMetadata(ratingKey);
@@ -566,16 +585,13 @@ class AvailabilitySync {
         throw ex;
       }
     }
-
-    //base case for if both exist in plex
-
+    //base case for if both media versions exist in plex
     if (existsInPlex && existsInPlex4k) {
       return true;
     }
 
     //we then check radarr or sonarr has that specific media. If not, then we will move to delete
     //if a non-4k or 4k version exists in at least one of the instances, we will only update that specific version
-
     if (media.mediaType === 'movie') {
       const existsInRadarr = await this.mediaExistsInRadarr(
         media,
@@ -584,7 +600,6 @@ class AvailabilitySync {
       );
 
       //if true, media exists in at least one radarr or plex instance.
-
       if (existsInRadarr) {
         logger.warn(
           `${media.tmdbId} exists in at least one radarr or plex instance. Media will be updated if set to available.`,
@@ -605,10 +620,9 @@ class AvailabilitySync {
       );
 
       //if true, media exists in at least one sonarr or plex instance.
-
       if (existsInSonarr) {
         logger.warn(
-          `${media.tmdbId} exists in at least one sonarr or plex instance. Media will be updated if set to available.`,
+          `${media.tvdbId} exists in at least one sonarr or plex instance. Media will be updated if set to available.`,
           {
             label: 'AvailabilitySync',
           }
@@ -658,6 +672,7 @@ class AvailabilitySync {
       }
     }
 
+    //base case for if both season versions exist in plex
     if (seasonExistsInPlex && seasonExistsInPlex4k) {
       return true;
     }
