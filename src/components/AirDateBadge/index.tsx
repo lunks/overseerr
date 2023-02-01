@@ -30,6 +30,12 @@ const AirDateBadge = ({ airDate }: AirDateBadgeProps) => {
     showRelative = true;
   }
 
+  const relativeTime =
+    (dAirDate.getTime() - dAirDate.getTimezoneOffset() * -60000 - Date.now()) /
+    1000;
+
+  const within24Hours = Math.floor(Math.abs(relativeTime / (60 * 60))) <= 24;
+
   return (
     <div className="flex items-center space-x-2">
       <Badge badgeType="light">
@@ -45,9 +51,15 @@ const AirDateBadge = ({ airDate }: AirDateBadgeProps) => {
           {intl.formatMessage(
             alreadyAired ? messages.airedrelative : messages.airsrelative,
             {
-              relativeTime: (
+              relativeTime: within24Hours ? (
+                alreadyAired ? (
+                  'today'
+                ) : (
+                  'tomorrow'
+                )
+              ) : (
                 <FormattedRelativeTime
-                  value={(dAirDate.getTime() - Date.now()) / 1000}
+                  value={relativeTime}
                   numeric="auto"
                   updateIntervalInSeconds={1}
                 />
